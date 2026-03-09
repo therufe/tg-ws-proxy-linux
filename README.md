@@ -18,35 +18,35 @@ Telegram Desktop → SOCKS5 (127.0.0.1:1080) → TG WS Proxy → WSS (kws*.web.t
 
 ## Быстрый старт
 
-Перейдите на [страницу релизов](https://github.com/therufe/tg-ws-proxy-linux/releases) и скачайте **`tgwsproxy-x86_64.appimage`**.
+Скачайте [последний релиз](https://github.com/therufe/tg-ws-proxy-linux/releases/latest) и запустите его двойным щелчком или в терминале (`chmod +x tgwsproxy-x86_64.AppImage` и затем `./tgwsproxy-x86_64.AppImage`).
 
-Приложение сворачивается в трей.
+Приложение будет висеть в трее.
 
 **Меню трея:**
 - **Добавить прокси в Telegram** — добавить прокси через `tg://socks` ссылку
 - **Настройки** — GUI-редактор конфигурации
 - **Выход** — остановить прокси и закрыть приложение
 
-## Сборка AppImage
+### Сборка AppImage (требуется Docker)
 
-### требуется Docker
 ```bash
 ./make.sh
 ```
 
-### Само приложение
+### Запуск приложения
 
 ```bash
+pip install -r requirements.txt
 python src/main.py
 ```
 
-### Консольная версия
+### Запуск консольной версии
 
 ```bash
 python proxy/tg_ws_proxy.py [--port PORT] [--dc-ip DC:IP ...] [-v]
 ```
 
-**Аргументы:**
+**Аргументы которые принимает консольная версия:**
 
 | Аргумент | По умолчанию | Описание |
 |---|---|---|

@@ -5,19 +5,18 @@ import logging
 import os
 import sys
 import threading
-import time
 import webbrowser
 import psutil
+import atexit
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
-from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel,
-                             QLineEdit, QCheckBox, QPushButton, QHBoxLayout,
+                             QLineEdit, QCheckBox, QPushButton,
                              QTextEdit, QMessageBox, QSystemTrayIcon, QMenu,
                              QFormLayout)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal, QObject
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtGui import QIcon
 
 import proxy.tg_ws_proxy as tg_ws_proxy
 
@@ -25,7 +24,6 @@ APP_NAME = "tgwsproxy"
 APP_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME
 CONFIG_FILE = APP_DIR / "config.json"
 LOG_FILE = APP_DIR / "proxy.log"
-FIRST_RUN_MARKER = APP_DIR / ".wasfirstrund"
 
 DEFAULT_CONFIG = {
     "port": 1080,
@@ -34,29 +32,28 @@ DEFAULT_CONFIG = {
     "verbose": False,
 }
 
-_proxy_thread: Optional[threading.Thread] = None
-_async_stop: Optional[object] = None
 _config: dict = {}
-log = logging.getLogger("tg-ws-tray")
+proxy_error_signal = None 
+log = logging.getLogger("tgws-tray")
+
+def _setup_logging(verbose: bool):
+    _ensure_dirs()
+    level = logging.DEBUG if verbose else logging.WARNING
+    fh = logging.FileHandler(LOG_FILE, encoding='utf-8', mode='w')
+    fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    fh.setFormatter(fmt)
+    
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(fh)
+    
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
 
 def resource_path(relative_path):
     base_path = os.path.abspath(os.path.dirname(__file__))
     return os.path.join(base_path, relative_path)
-
-def _load_icon():
-    icon_path = resource_path("resources/icon.png")
-
-    log.info(f"Trying to load icon from: {icon_path}")
-
-    if icon_path.exists():
-        try:
-            from PIL import Image
-            return Image.open(str(icon_path))
-        except Exception as e:
-            log.error(f"Failed to load icon image: {e}")
-
-    log.warning("Icon file not found, using generated icon")
-    return _make_icon_image()
 
 def _ensure_dirs():
     APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,37 +61,39 @@ def _ensure_dirs():
 def _acquire_lock() -> bool:
     _ensure_dirs()
     lock_file = APP_DIR / f"{os.getpid()}.lock"
-    # проверяем наличие .lock файлов
     for f in APP_DIR.glob("*.lock"):
-        if f != lock_file and f.exists():
-            try:
-                pid = int(f.stem)
-                if psutil.pid_exists(pid): return False
-                f.unlink()
-            except: pass
+        try:
+            pid = int(f.stem)
+            if psutil.pid_exists(pid): 
+                return False
+            f.unlink()
+        except (ValueError, OSError):
+            pass
     lock_file.touch()
+    atexit.register(lambda: lock_file.unlink(missing_ok=True))
     return True
 
 class SettingsWindow(QWidget):
-    def __init__(self, config, callback):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.callback = callback
         self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle("Настройки")
         self.setFixedWidth(400)
-        layout = QVBoxLayout()
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowMaximizeButtonHint)
 
+        layout = QVBoxLayout()
         form = QFormLayout()
+
         self.host_input = QLineEdit(self.config.get("host", "127.0.0.1"))
         self.port_input = QLineEdit(str(self.config.get("port", 1080)))
         form.addRow("IP-адрес:", self.host_input)
         form.addRow("Порт:", self.port_input)
 
         layout.addLayout(form)
-        layout.addWidget(QLabel("DC маппинги (DC:IP):"))
+        layout.addWidget(QLabel("DC маппинги (формат DC:IP):"))
         self.dc_edit = QTextEdit("\n".join(self.config.get("dc_ip", [])))
         layout.addWidget(self.dc_edit)
 
@@ -102,75 +101,133 @@ class SettingsWindow(QWidget):
         self.verbose_check.setChecked(self.config.get("verbose", False))
         layout.addWidget(self.verbose_check)
 
-        btn_save = QPushButton("Сохранить и перезапустить")
+        btn_save = QPushButton("Сохранить настройки")
+        btn_save.setFixedHeight(40)
         btn_save.clicked.connect(self.save)
         layout.addWidget(btn_save)
 
         self.setLayout(layout)
 
     def save(self):
-        new_cfg = {
-            "host": self.host_input.text(),
-            "port": int(self.port_input.text()),
-            "dc_ip": self.dc_edit.toPlainText().splitlines(),
-            "verbose": self.verbose_check.isChecked()
-        }
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(new_cfg, f)
-        self.callback()
-        self.close()
+        try:
+            port = int(self.port_input.text().strip())
+            lines = [l.strip() for l in self.dc_edit.toPlainText().splitlines() if l.strip()]
+
+            # Валидация формата
+            tg_ws_proxy.parse_dc_ip_list(lines)
+
+            new_cfg = {
+                "host": self.host_input.text().strip() or "127.0.0.1",
+                "port": port,
+                "dc_ip": lines,
+                "verbose": self.verbose_check.isChecked()
+            }
+
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(new_cfg, f, indent=2)
+
+            QMessageBox.information(
+                self,
+                "Настройки сохранены",
+                "Параметры успешно записаны.\n\nДля применения изменений требуется перезапуск."
+            )
+            self.close()
+
+        except Exception as e:
+            log.error(f"Ошибка сохранения конфига: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Некорректные данные или формат DC:IP:\n{e}")
 
 def start_proxy():
-    global _proxy_thread
-    cfg = _config
-    _proxy_thread = threading.Thread(target=lambda: tg_ws_proxy.run_proxy(
-        cfg["port"], tg_ws_proxy.parse_dc_ip_list(cfg["dc_ip"]), host=cfg["host"]), daemon=True)
-    _proxy_thread.start()
+    def target():
+        host = _config.get("host", "127.0.0.1")
+        port = _config.get("port", 1080)
+        try:
+            dc_ips = _config.get("dc_ip", [])
+            dc_opt = tg_ws_proxy.parse_dc_ip_list(dc_ips)
+            tg_ws_proxy.run_proxy(port, dc_opt, host=host)
+        except Exception as e:
+            msg = str(e)
+            if "address already in use" in msg.lower() or (isinstance(e, OSError) and e.errno in (98, 48, 10048)):
+                msg = f"Порт {port} уже занят!"
+            else:
+                msg = f"Ошибка прокси: {e}"
+
+            log.error(msg)
+            if proxy_error_signal:
+                proxy_error_signal.emit(msg)
+
+    threading.Thread(target=target, daemon=True).start()
 
 class TrayApp(QObject):
+    error_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
 
+        global proxy_error_signal
+        proxy_error_signal = self.error_signal
+        self.error_signal.connect(self.show_error)
+
         icon_path = resource_path('resources/icon.png')
+        tray_path = resource_path('resources/tray.png')
+        icon = QIcon(icon_path)
+        trayicon = QIcon(tray_path)
+        self.app.setWindowIcon(icon)
 
-        self.app.setWindowIcon(QIcon(icon_path))
-        self.tray = QSystemTrayIcon(QIcon(icon_path))
-        self.tray.setToolTip("tgwsproxy")
+        self.tray = QSystemTrayIcon(trayicon)
+        self.tray.setToolTip("tgwsproxy - работает")
+
         menu = QMenu()
+        a_tg = menu.addAction("Добавить в Telegram")
+        a_tg.triggered.connect(self.open_tg)
 
-        open_action = QAction("Добавить прокси в Telegram", self.app)
-        open_action.triggered.connect(self.open_tg)
-        menu.addAction(open_action)
+        a_set = menu.addAction("Настройки")
+        a_set.triggered.connect(self.show_settings)
 
-        settings_action = QAction("Настройки", self.app)
-        settings_action.triggered.connect(self.show_settings)
-        menu.addAction(settings_action)
-
-        exit_action = QAction("Выход", self.app)
-        exit_action.triggered.connect(self.app.quit)
-        menu.addAction(exit_action)
+        menu.addSeparator()
+        a_exit = menu.addAction("Выход")
+        a_exit.triggered.connect(self.app.quit)
 
         self.tray.setContextMenu(menu)
         self.tray.show()
 
+    def show_error(self, msg):
+        QMessageBox.critical(None, "Ошибка прокси", msg)
+
     def open_tg(self):
-        webbrowser.open(f"tg://socks?server={_config['host']}&port={_config['port']}")
+        h = _config.get('host', '127.0.0.1')
+        p = _config.get('port', 1080)
+        webbrowser.open(f"tg://socks?server={h}&port={p}")
 
     def show_settings(self):
-        self.win = SettingsWindow(_config, lambda: os.execv(sys.executable, ['python'] + sys.argv))
+        self.win = SettingsWindow(_config)
         self.win.show()
 
     def run(self):
         start_proxy()
-        sys.exit(self.app.exec())
+        self.tray.showMessage(
+            "tgwsproxy",
+            f"Прокси запущено. Клик правой кнопкой по иконке, если требуется настройка",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000
+        )
+        return self.app.exec()
 
 if __name__ == "__main__":
-    if not _acquire_lock(): sys.exit(0)
-    _ensure_dirs()
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r") as f: _config = json.load(f)
-    else: _config = DEFAULT_CONFIG
+    if not _acquire_lock():
+        app_err = QApplication(sys.argv)
+        QMessageBox.critical(None, "Ошибка", "Приложение уже запущено!")
+        sys.exit(0)
 
-    TrayApp().run()
+    try:
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r") as f: _config = json.load(f)
+        else: _config = DEFAULT_CONFIG
+    except: _config = DEFAULT_CONFIG
+
+    _setup_logging(_config.get("verbose", False))
+
+    tray_app = TrayApp()
+    sys.exit(tray_app.run())
