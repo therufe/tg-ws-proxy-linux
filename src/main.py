@@ -8,6 +8,7 @@ import threading
 import webbrowser
 import psutil
 import atexit
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -33,7 +34,7 @@ DEFAULT_CONFIG = {
 }
 
 _config: dict = {}
-proxy_error_signal = None 
+proxy_error_signal = None
 log = logging.getLogger("tgws-tray")
 
 def _setup_logging(verbose: bool):
@@ -42,11 +43,11 @@ def _setup_logging(verbose: bool):
     fh = logging.FileHandler(LOG_FILE, encoding='utf-8', mode='w')
     fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
     fh.setFormatter(fmt)
-    
+
     root = logging.getLogger()
     root.setLevel(level)
     root.addHandler(fh)
-    
+
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     root.addHandler(sh)
@@ -64,7 +65,7 @@ def _acquire_lock() -> bool:
     for f in APP_DIR.glob("*.lock"):
         try:
             pid = int(f.stem)
-            if psutil.pid_exists(pid): 
+            if psutil.pid_exists(pid):
                 return False
             f.unlink()
         except (ValueError, OSError):
@@ -111,9 +112,13 @@ class SettingsWindow(QWidget):
     def save(self):
         try:
             port = int(self.port_input.text().strip())
-            lines = [l.strip() for l in self.dc_edit.toPlainText().splitlines() if l.strip()]
 
-            # Валидация формата
+            raw_text = self.dc_edit.toPlainText()
+            for char in [',', ';', '\n']:
+                raw_text = raw_text.replace(char, ' ')
+
+            lines = [l.strip() for l in raw_text.split() if l.strip()]
+
             tg_ws_proxy.parse_dc_ip_list(lines)
 
             new_cfg = {
@@ -122,39 +127,35 @@ class SettingsWindow(QWidget):
                 "dc_ip": lines,
                 "verbose": self.verbose_check.isChecked()
             }
-
             with open(CONFIG_FILE, "w") as f:
                 json.dump(new_cfg, f, indent=2)
 
             QMessageBox.information(
                 self,
                 "Настройки сохранены",
-                "Параметры успешно записаны.\n\nДля применения изменений требуется перезапуск."
+                "Изменения успешно записаны.\n\nДля их применения требуется перезапуск."
             )
             self.close()
-
         except Exception as e:
-            log.error(f"Ошибка сохранения конфига: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Некорректные данные или формат DC:IP:\n{e}")
+            QMessageBox.warning(self, "Ошибка", f"Некорректные данные в списке DC:IP - \n{e}")
 
 def start_proxy():
     def target():
-        host = _config.get("host", "127.0.0.1")
-        port = _config.get("port", 1080)
+        h, p = _config.get("host", "127.0.0.1"), _config.get("port", 1080)
         try:
-            dc_ips = _config.get("dc_ip", [])
-            dc_opt = tg_ws_proxy.parse_dc_ip_list(dc_ips)
-            tg_ws_proxy.run_proxy(port, dc_opt, host=host)
+            raw_ips = _config.get("dc_ip", [])
+            flat_ips =[]
+            for item in raw_ips:
+                flat_ips.extend(item.split())
+
+            dc_opt = tg_ws_proxy.parse_dc_ip_list(flat_ips)
+            tg_ws_proxy.run_proxy(p, dc_opt, host=h)
         except Exception as e:
             msg = str(e)
-            if "address already in use" in msg.lower() or (isinstance(e, OSError) and e.errno in (98, 48, 10048)):
-                msg = f"Порт {port} уже занят!"
-            else:
-                msg = f"Ошибка прокси: {e}"
-
+            if "already in use" in msg.lower() or (isinstance(e, OSError) and e.errno == 98):
+                msg = f"Порт {p} занят другим приложением"
             log.error(msg)
-            if proxy_error_signal:
-                proxy_error_signal.emit(msg)
+            if proxy_error_signal: proxy_error_signal.emit(msg)
 
     threading.Thread(target=target, daemon=True).start()
 
@@ -180,11 +181,14 @@ class TrayApp(QObject):
         self.tray.setToolTip("tgwsproxy - работает")
 
         menu = QMenu()
-        a_tg = menu.addAction("Добавить в Telegram")
+        a_tg = menu.addAction("Добавить прокси в Telegram")
         a_tg.triggered.connect(self.open_tg)
 
-        a_set = menu.addAction("Настройки")
+        a_set = menu.addAction("Настройки прокси")
         a_set.triggered.connect(self.show_settings)
+
+        act_log = menu.addAction("Открыть логи")
+        act_log.triggered.connect(self.open_log)
 
         menu.addSeparator()
         a_exit = menu.addAction("Выход")
@@ -200,6 +204,12 @@ class TrayApp(QObject):
         h = _config.get('host', '127.0.0.1')
         p = _config.get('port', 1080)
         webbrowser.open(f"tg://socks?server={h}&port={p}")
+
+    def open_log(self):
+        if LOG_FILE.exists():
+            subprocess.Popen(['xdg-open', str(LOG_FILE)])
+        else:
+            QMessageBox.information(None, "Ошибка", f"Файл логов отсутствует:\n{LOG_FILE}")
 
     def show_settings(self):
         self.win = SettingsWindow(_config)
