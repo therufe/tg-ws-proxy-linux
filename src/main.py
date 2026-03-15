@@ -201,9 +201,24 @@ class TrayApp(QObject):
         QMessageBox.critical(None, "Ошибка прокси", msg)
 
     def open_tg(self):
-        h = _config.get('host', '127.0.0.1')
+        # h = _config.get('host', '127.0.0.1')
         p = _config.get('port', 1080)
-        webbrowser.open(f"tg://socks?server={h}&port={p}")
+        url = f"tg://socks?server=127.0.0.1&port={p}"
+
+        QApplication.clipboard().setText(url)
+
+        try:
+            res = subprocess.call(['xdg-open', url], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            if res != 0:
+                raise RuntimeError("xdg-open не смог найти обработчик для ссылки")
+        except Exception as e:
+            log.warning(f"Не удалось открыть Telegram автоматически: {e}")
+            self.tray.showMessage(
+                "tgwsproxy",
+                f"Не удалось открыть Telegram (вероятно используется Flatpak или Snap версия). Ссылка скопирована в буфер обмена, отправьте её в любой чат Telegram (например, в «Избранное») и нажмите по ней для подключения.",
+                QSystemTrayIcon.MessageIcon.Information,
+                10000
+            )
 
     def open_log(self):
         if LOG_FILE.exists():
