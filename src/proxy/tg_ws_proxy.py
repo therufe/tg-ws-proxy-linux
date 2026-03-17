@@ -18,8 +18,8 @@ DEFAULT_PORT = 1080
 log = logging.getLogger('tg-ws-proxy')
 
 _TCP_NODELAY = True
-_RECV_BUF = 131072
-_SEND_BUF = 131072
+_RECV_BUF = 65536
+_SEND_BUF = 65536
 _WS_POOL_SIZE = 4
 _WS_POOL_MAX_AGE = 120.0
 
@@ -64,8 +64,6 @@ _IP_TO_DC: Dict[str, Tuple[int, bool]] = {
     '149.154.171.5':  (5, False),
     '91.108.56.102': (5, True), '91.108.56.128': (5, True),
     '91.108.56.151': (5, True),
-    # DC203
-    '91.105.192.100': (203, False),
 }
 
 _dc_opt: Dict[int, Optional[str]] = {}
@@ -377,7 +375,7 @@ def _dc_from_init(data: bytes) -> Tuple[Optional[int], bool]:
                   proto, dc_raw, plain.hex())
         if proto in (0xEFEFEFEF, 0xEEEEEEEE, 0xDDDDDDDD):
             dc = abs(dc_raw)
-            if 1 <= dc <= 1000:
+            if 1 <= dc <= 5:
                 return dc, (dc_raw < 0)
     except Exception as exc:
         log.debug("DC extraction failed: %s", exc)
@@ -464,16 +462,9 @@ class _MsgSplitter:
 
 
 def _ws_domains(dc: int, is_media) -> List[str]:
-    """
-    Return domain names to try for WebSocket connection to a DC.
-
-    DC 1-5:  kws{N}[-1].web.telegram.org
-    DC >5:   kws{N}[-1].telegram.org
-    """
-    base = 'telegram.org' if dc > 5 else 'web.telegram.org'
     if is_media is None or is_media:
-        return [f'kws{dc}-1.{base}', f'kws{dc}.{base}']
-    return [f'kws{dc}.{base}', f'kws{dc}-1.{base}']
+        return [f'kws{dc}-1.web.telegram.org', f'kws{dc}.web.telegram.org']
+    return [f'kws{dc}.web.telegram.org', f'kws{dc}-1.web.telegram.org']
 
 
 class Stats:
@@ -614,7 +605,7 @@ async def _bridge_ws(reader, writer, ws: RawWebSocket, label,
         nonlocal up_bytes, up_packets
         try:
             while True:
-                chunk = await reader.read(131072)
+                chunk = await reader.read(65536)
                 if not chunk:
                     break
                 _stats.bytes_up += len(chunk)
@@ -821,8 +812,8 @@ async def _handle_client(reader, writer):
         if ':' in dst:
             log.error(
                 "[%s] IPv6 address detected: %s:%d — "
-                "IPv6 doesn't supported "
-                "Disable IPv6 to continue using the proxy.",
+                "IPv6 addresses are not supported; "
+                "disable IPv6 to continue using the proxy.",
                 label, dst, port)
             writer.write(_socks5_reply(0x05))
             await writer.drain()
