@@ -1,3 +1,6 @@
+> [!WARNING]
+> linux версия появилась в [оригинальном репозитории](https://github.com/Flowseal/tg-ws-proxy)
+
 # TG WS Proxy Linux
 
 Локальный SOCKS5-прокси для Telegram Desktop, который перенаправляет трафик через WebSocket-соединения к указанным серверам, помогая частично ускорить работу Telegram.  
